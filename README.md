@@ -7,11 +7,10 @@ When you use an agent every day, you open a lot of threads: a visa application, 
 ## What it does
 
 - **Topic index**: reads your Hermes conversations (desktop, CLI/TUI, Telegram) from `~/.hermes/state.db` and asks Hermes itself to group them into topics. Each topic has a summary, a concrete next step, who has the ball (you, Hermes, a third party) and its linked conversations.
-- **Talk about a topic**: every topic has its own chat. The first message gives Hermes the topic context (summary, next step, links to past sessions); follow-ups continue the same Hermes session, with all of its tools, memory and skills. The sessions also show up in Hermes, titled `Sujet · …`.
+- **Talk about a topic**: every topic has its own chat. The first message gives Hermes the topic context (summary, next step, links to past sessions); follow-ups continue the same Hermes session, with all of its tools, memory and skills. The sessions also show up in Hermes, titled `Topic · …`.
 - **Triage**: Done, Snooze (comes back by itself), Pin, Reopen, and **Drop**. Dropping can optionally ask Hermes to list what is still attached to the topic (tasks, cron jobs, drafts) and propose a cleanup — nothing is deleted without your confirmation.
+- **Routines**: Hermes cron jobs (daily brief, weekly grocery list…) are not "open topics", so they live in their own section with their schedule, next/last run and last status (failures are flagged). Pause, resume, run now or delete them, and chat with Hermes to tweak one. Conversations about a routine are attached to it instead of creating a new topic.
 - **Incremental refresh**: only new or grown conversations are re-read, nightly at 4 am or on demand. A dropped topic only comes back if you talk about it again.
-
-The UI is in French.
 
 ## How it works
 
@@ -51,7 +50,8 @@ open http://127.0.0.1:4747
 
 | Variable | Default | |
 |---|---|---|
-| `HCT_USER_NAME` | `l'utilisateur` | Your first name, used in prompts |
+| `HCT_USER_NAME` | `the user` | Your first name, used in prompts |
+| `HCT_LANGUAGE` | `English` | Language of generated titles and summaries |
 | `HCT_PORT` | `4747` | HTTP port (bound to 127.0.0.1 only) |
 | `HCT_DATA_DIR` | `~/.hermes/control-tower` | Topic database and logs |
 | `HERMES_HOME` | `~/.hermes` | Hermes home (reads `state.db`) |

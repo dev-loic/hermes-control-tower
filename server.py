@@ -15,7 +15,7 @@ from aiohttp import web
 import indexer
 import store
 
-HOST, PORT = "127.0.0.1", int(os.environ.get("SUJETS_PORT", "4747"))
+HOST, PORT = "127.0.0.1", int(os.environ.get("HCT_PORT", "4747"))
 STATIC = Path(__file__).parent / "static"
 HERMES_BIN = indexer.HERMES_BIN
 
@@ -37,19 +37,19 @@ class ChatRun:
 
 RUNS: dict[str, ChatRun] = {}
 
-PREAMBLE = """[Message envoyé depuis Hermes Control Tower — on parle d'un sujet précis]
-Sujet : {emoji} {title}
-Statut : {status} · À qui la main : {owner}
-Où on en est : {summary}
-Prochaine étape : {next_step}
-Conversations passées sur ce sujet (lis-les avec session_search session_id=… si tu as besoin du détail) :
+PREAMBLE = """[Sent from Hermes Control Tower — this conversation is about one specific topic. Reply in the language {user} writes in.]
+Topic: {emoji} {title}{routine}
+Status: {status} · Whose move: {owner}
+Where we are: {summary}
+Next step: {next_step}
+Past conversations about it (read them with session_search session_id=… if you need details):
 {sessions}
 
-Message de {user} :
+Message from {user}:
 {message}"""
 
-OWNER_FR = {"user": store.USER_NAME, "hermes": "Hermes", "waiting": "on attend un tiers", "none": "personne"}
-STATUS_FR = {"open": "en cours", "snoozed": "en pause", "done": "fait", "dropped": "droppé"}
+OWNER_TXT = {"user": store.USER_NAME, "hermes": "Hermes", "waiting": "waiting on a third party", "none": "nobody"}
+STATUS_TXT = {"open": "open", "snoozed": "snoozed", "done": "done", "dropped": "dropped"}
 
 
 def _build_query(conn, topic, message):
@@ -61,11 +61,17 @@ def _build_query(conn, topic, message):
     for sid in sorted(sids, key=lambda s: meta.get(s, {}).get("started_at") or 0):
         m = meta.get(sid)
         if m:
-            day = datetime.fromtimestamp(m["started_at"]).strftime("%d/%m/%Y")
-            lines.append(f"- {day} · {m['title'] or '(sans titre)'} · {sid}")
-    return PREAMBLE.format(user=store.USER_NAME, emoji=topic["emoji"], title=topic["title"], status=STATUS_FR.get(topic["status"], topic["status"]),
-                           owner=OWNER_FR.get(topic["owner"], topic["owner"]), summary=topic["summary"] or "—",
-                           next_step=topic["next_step"] or "—", sessions="\n".join(lines) or "(aucune)", message=message)
+            day = datetime.fromtimestamp(m["started_at"]).strftime("%Y-%m-%d")
+            lines.append(f"- {day} · {m['title'] or '(untitled)'} · {sid}")
+    routine = ""
+    if topic["cron_job_id"]:
+        job = store.cron_jobs().get(topic["cron_job_id"])
+        if job:
+            routine = (f"\nThis is an automated ROUTINE: your cron job \"{job.get('name')}\" (id {job['id']}, "
+                       f"{store.schedule_text(job)}). To change it, use the cronjob tool on that id.")
+    return PREAMBLE.format(user=store.USER_NAME, routine=routine, emoji=topic["emoji"], title=topic["title"], status=STATUS_TXT.get(topic["status"], topic["status"]),
+                           owner=OWNER_TXT.get(topic["owner"], topic["owner"]), summary=topic["summary"] or "—",
+                           next_step=topic["next_step"] or "—", sessions="\n".join(lines) or "(none)", message=message)
 
 
 async def run_chat(run: ChatRun, query: str, resume: str | None, title: str):
@@ -80,7 +86,7 @@ async def run_chat(run: ChatRun, query: str, resume: str | None, title: str):
         run.proc.stdin.write(query.encode())
         await run.proc.stdin.drain()
         run.proc.stdin.close()
-        await run.push({"type": "status", "text": "Hermes réfléchit…"})
+        await run.push({"type": "status", "text": "Hermes is thinking…"})
         while True:
             line = await run.proc.stdout.readline()
             if not line:
@@ -116,7 +122,7 @@ async def run_chat(run: ChatRun, query: str, resume: str | None, title: str):
         err = (await run.proc.stderr.read()).decode(errors="replace").strip()
         content = (final or "".join(text_parts)).strip()
         if not content:
-            content = "⚠️ Pas de réponse de Hermes." + (f"\n\n```\n{err[-800:]}\n```" if err else "")
+            content = "⚠️ No answer from Hermes." + (f"\n\n```\n{err[-800:]}\n```" if err else "")
         conn = store.connect()
         try:
             now = time.time()
@@ -131,11 +137,11 @@ async def run_chat(run: ChatRun, query: str, resume: str | None, title: str):
         finally:
             conn.close()
         if session_id and not resume:
-            await asyncio.create_subprocess_exec(HERMES_BIN, "sessions", "rename", session_id, f"Sujet · {title}"[:90],
+            await asyncio.create_subprocess_exec(HERMES_BIN, "sessions", "rename", session_id, f"Topic · {title}"[:90],
                                                  stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await run.push({"type": "final", "text": content, "tools": tools})
     except Exception as exc:  # surface any failure in the UI
-        await run.push({"type": "final", "text": f"⚠️ Erreur : {exc}", "tools": tools})
+        await run.push({"type": "final", "text": f"⚠️ Error: {exc}", "tools": tools})
     finally:
         run.done = True
         await run.push({"type": "end"})
@@ -146,11 +152,11 @@ REFRESH = {"running": False, "message": "", "error": None}
 
 
 def _refresh_thread():
-    REFRESH.update(running=True, message="Démarrage…", error=None)
+    REFRESH.update(running=True, message="Starting…", error=None)
     try:
         indexer.refresh(progress=lambda m: REFRESH.update(message=m))
     except Exception as exc:
-        REFRESH.update(error=str(exc), message="Échec de l'analyse")
+        REFRESH.update(error=str(exc), message="Analysis failed")
     finally:
         REFRESH["running"] = False
 
@@ -186,10 +192,12 @@ async def list_topics(request):
     conn = store.connect()
     try:
         store.wake_snoozed(conn)
+        jobs = store.sync_routines(conn)
         rows = conn.execute("SELECT * FROM topics ORDER BY pinned DESC, coalesce(last_activity, updated_at) DESC").fetchall()
         topics = [store.topic_dict(conn, r) for r in rows]
         for t in topics:
             t["running"] = t["id"] in RUNS and not RUNS[t["id"]].done
+            t["cron"] = store.cron_info(jobs[t["cron_job_id"]]) if t.get("cron_job_id") in jobs else None
         return j({"topics": topics, "last_refresh": store.get_meta(conn, "last_refresh"), "refresh": REFRESH})
     finally:
         conn.close()
@@ -220,6 +228,8 @@ async def get_topic(request):
         if not row:
             return j({"error": "not found"}, 404)
         t = store.topic_dict(conn, row)
+        job = store.cron_jobs().get(t.get("cron_job_id") or "")
+        t["cron"] = store.cron_info(job) if job else None
         meta = store.sessions_meta(t["session_ids"])
         t["sessions"] = sorted([meta[s] for s in t["session_ids"] if s in meta],
                                key=lambda m: m["started_at"], reverse=True)
@@ -287,7 +297,7 @@ async def post_chat(request):
     if not message:
         return j({"error": "empty"}, 400)
     if tid in RUNS and not RUNS[tid].done:
-        return j({"error": "Hermes répond déjà sur ce sujet"}, 409)
+        return j({"error": "Hermes is already answering on this topic"}, 409)
     conn = store.connect()
     try:
         topic = conn.execute("SELECT * FROM topics WHERE id=?", (tid,)).fetchone()
@@ -345,6 +355,32 @@ async def stop_chat(request):
     return j({"ok": True})
 
 
+async def cron_action(request):
+    tid = request.match_info["id"]
+    action = (await request.json()).get("action")
+    if action not in ("pause", "resume", "run", "remove"):
+        return j({"error": "bad action"}, 400)
+    conn = store.connect()
+    try:
+        row = conn.execute("SELECT cron_job_id FROM topics WHERE id=?", (tid,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["cron_job_id"]:
+        return j({"error": "not a routine"}, 400)
+    proc = await asyncio.create_subprocess_exec(HERMES_BIN, "cron", action, row["cron_job_id"],
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+    text = out.decode(errors="replace").strip()
+    if proc.returncode != 0:
+        return j({"error": text[-300:] or "failed"}, 500)
+    conn = store.connect()
+    try:
+        store.sync_routines(conn)
+    finally:
+        conn.close()
+    return j({"ok": True, "output": text[-300:]})
+
+
 async def session_view(request):
     return j(store.session_transcript(request.match_info["sid"]))
 
@@ -390,6 +426,7 @@ def make_app():
     app.router.add_post("/api/topics/{id}/chat", post_chat)
     app.router.add_get("/api/topics/{id}/stream", stream)
     app.router.add_post("/api/topics/{id}/stop", stop_chat)
+    app.router.add_post("/api/topics/{id}/cron", cron_action)
     app.router.add_get("/api/sessions/{sid}", session_view)
     app.router.add_post("/api/refresh", refresh_post)
     app.router.add_get("/api/refresh", refresh_get)

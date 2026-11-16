@@ -9,31 +9,51 @@ const api = async (path, opts = {}) => {
   return data;
 };
 
-const OWNER = { user: "À toi", hermes: "À moi", waiting: "En attente", none: "Rien à faire" };
-const STATUS = { open: "En cours", snoozed: "En pause", done: "Fait", dropped: "Droppé" };
+const LOCALE = "en-GB";
+const OWNER = { user: "Your move", hermes: "Hermes' move", waiting: "Waiting", none: "Nothing to do" };
+const STATUS = { open: "Open", snoozed: "Snoozed", done: "Done", dropped: "Dropped" };
+const isRoutine = (t) => !!t.cron_job_id;
 const FILTERS = [
-  { id: "user", label: "À toi", icon: "🫵", test: (t) => t.status === "open" && t.owner === "user" },
-  { id: "hermes", label: "À moi", icon: "🤖", test: (t) => t.status === "open" && t.owner === "hermes" },
-  { id: "waiting", label: "En attente", icon: "⏳", test: (t) => t.status === "open" && (t.owner === "waiting" || t.owner === "none") },
-  { id: "open", label: "En cours", icon: "📂", test: (t) => t.status === "open" },
+  { id: "user", label: "Your move", icon: "🫵", test: (t) => !isRoutine(t) && t.status === "open" && t.owner === "user" },
+  { id: "hermes", label: "Hermes' move", icon: "🤖", test: (t) => !isRoutine(t) && t.status === "open" && t.owner === "hermes" },
+  { id: "waiting", label: "Waiting", icon: "⏳", test: (t) => !isRoutine(t) && t.status === "open" && (t.owner === "waiting" || t.owner === "none") },
+  { id: "open", label: "All open", icon: "📂", test: (t) => !isRoutine(t) && t.status === "open" },
   { sep: true },
-  { id: "snoozed", label: "En pause", icon: "⏸️", test: (t) => t.status === "snoozed" },
-  { id: "done", label: "Faits", icon: "✅", test: (t) => t.status === "done" },
-  { id: "dropped", label: "Droppés", icon: "🗑️", test: (t) => t.status === "dropped" },
+  { id: "routines", label: "Routines", icon: "🔁", test: (t) => isRoutine(t), badge: (ts) => ts.filter((t) => isRoutine(t) && t.cron && t.cron.last_status && t.cron.last_status !== "ok").length },
+  { sep: true },
+  { id: "snoozed", label: "Snoozed", icon: "⏸️", test: (t) => !isRoutine(t) && t.status === "snoozed" },
+  { id: "done", label: "Done", icon: "✅", test: (t) => !isRoutine(t) && t.status === "done" },
+  { id: "dropped", label: "Dropped", icon: "🗑️", test: (t) => !isRoutine(t) && t.status === "dropped" },
 ];
 
 const state = { topics: [], filter: localStorage.getItem("filter") || "open", sel: localStorage.getItem("sel"), q: "", detail: null, es: null, live: null };
+if (!FILTERS.some((f) => f.id === state.filter)) state.filter = "open";
 
 function rel(ts) {
   if (!ts) return "";
   const d = (Date.now() / 1000 - ts) / 86400;
-  if (d < 1 / 24) return "à l'instant";
-  if (d < 1) return `il y a ${Math.round(d * 24)} h`;
-  if (d < 2) return "hier";
-  if (d < 30) return `il y a ${Math.round(d)} j`;
-  return new Date(ts * 1000).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+  if (d < 1 / 24) return "just now";
+  if (d < 1) return `${Math.round(d * 24)}h ago`;
+  if (d < 2) return "yesterday";
+  if (d < 30) return `${Math.round(d)}d ago`;
+  return new Date(ts * 1000).toLocaleDateString(LOCALE, { day: "numeric", month: "short" });
 }
-const fmtDate = (ts) => new Date(ts * 1000).toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: "numeric" });
+const fmtDate = (ts) => new Date(ts * 1000).toLocaleDateString(LOCALE, { day: "numeric", month: "short", year: "numeric" });
+function fmtWhen(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso), now = new Date();
+  const day = d.toDateString() === now.toDateString() ? "today" :
+    d.toDateString() === new Date(now.getTime() + 86400000).toDateString() ? "tomorrow" :
+    d.toDateString() === new Date(now.getTime() - 86400000).toDateString() ? "yesterday" :
+    d.toLocaleDateString(LOCALE, { weekday: "short", day: "numeric", month: "short" });
+  return `${day}, ${d.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" })}`;
+}
+function cronPill(c) {
+  if (!c) return `<span class="pill none">Unknown job</span>`;
+  if (!c.enabled) return `<span class="pill snoozed">Paused</span>`;
+  if (c.last_status && c.last_status !== "ok") return `<span class="pill dropped">Last run failed</span>`;
+  return `<span class="pill done">Active</span>`;
+}
 
 // ------------------------------------------------------------------ data
 async function loadTopics() {
@@ -48,8 +68,8 @@ async function loadTopics() {
 function renderRefresh(r, last) {
   const btn = $("#refreshBtn");
   btn.disabled = !!r.running;
-  btn.textContent = r.running ? "⏳ Analyse en cours…" : "↻ Mettre à jour";
-  $("#refreshInfo").textContent = r.running ? r.message : r.error ? "⚠️ " + r.error.slice(0, 80) : last ? "Mis à jour " + rel(last) : "";
+  btn.textContent = r.running ? "⏳ Analysing…" : "↻ Refresh";
+  $("#refreshInfo").textContent = r.running ? r.message : r.error ? "⚠️ " + r.error.slice(0, 80) : last ? "Updated " + rel(last) : "";
 }
 
 let refreshTimer = null;
@@ -59,39 +79,44 @@ function pollRefresh() {
     const r = await api("/api/refresh");
     renderRefresh(r);
     if (r.running) pollRefresh();
-    else { await loadTopics(); if (state.sel) openTopic(state.sel, true); toast(r.error ? "L'analyse a échoué" : "Sujets mis à jour"); }
+    else { await loadTopics(); if (state.sel) openTopic(state.sel, true); toast(r.error ? "Analysis failed" : "Topics updated"); }
   }, 2500);
 }
 
 // ------------------------------------------------------------------ sidebar & list
 function renderFilters() {
-  $("#filters").innerHTML = FILTERS.map((f) =>
-    f.sep ? '<div class="sep"></div>' :
-    `<button data-f="${f.id}" class="${state.filter === f.id ? "active" : ""}"><span>${f.icon}</span>${f.label}<span class="count">${state.topics.filter(f.test).length || ""}</span></button>`
-  ).join("");
+  $("#filters").innerHTML = FILTERS.map((f) => {
+    if (f.sep) return '<div class="sep"></div>';
+    const n = state.topics.filter(f.test).length;
+    const bad = f.badge ? f.badge(state.topics) : 0;
+    return `<button data-f="${f.id}" class="${state.filter === f.id ? "active" : ""}"><span>${f.icon}</span>${f.label}${bad ? `<span class="alert-dot" title="${bad} failing">!</span>` : ""}<span class="count">${n || ""}</span></button>`;
+  }).join("");
   document.querySelectorAll("#filters button").forEach((b) => (b.onclick = () => { state.filter = b.dataset.f; localStorage.setItem("filter", state.filter); renderFilters(); renderList(); }));
 }
 
 function renderList() {
   const f = FILTERS.find((x) => x.id === state.filter) || FILTERS[3];
   const q = state.q.toLowerCase();
-  let items = q ? state.topics.filter((t) => (t.title + " " + t.summary + " " + t.next_step).toLowerCase().includes(q)) : state.topics.filter(f.test);
-  const card = (t) => `
-    <div class="card ${t.id === state.sel ? "sel" : ""} ${["done", "dropped"].includes(t.status) ? "dim" : ""}" data-id="${t.id}">
+  const items = q ? state.topics.filter((t) => (t.title + " " + t.summary + " " + t.next_step).toLowerCase().includes(q)) : state.topics.filter(f.test);
+  const card = (t) => {
+    const r = isRoutine(t);
+    const sub = r ? (t.cron ? `${esc(t.cron.schedule)} · next ${esc(fmtWhen(t.cron.next_run_at))}` : "") : esc(t.next_step);
+    const pill = r ? cronPill(t.cron) :
+      t.status === "open" ? `<span class="pill ${t.owner}">${OWNER[t.owner]}</span>` :
+      `<span class="pill ${t.status}">${STATUS[t.status]}${t.status === "snoozed" && t.snooze_until ? " → " + new Date(t.snooze_until * 1000).toLocaleDateString(LOCALE, { day: "numeric", month: "short" }) : ""}</span>`;
+    return `
+    <div class="card ${t.id === state.sel ? "sel" : ""} ${["done", "dropped"].includes(t.status) || (r && t.cron && !t.cron.enabled) ? "dim" : ""}" data-id="${t.id}">
       ${t.pinned ? '<span class="pin">📌</span>' : ""}
       <div class="emo">${esc(t.emoji)}</div>
       <div class="body">
         <div class="title">${esc(t.title)}</div>
-        ${t.next_step ? `<div class="next">${esc(t.next_step)}</div>` : ""}
-        <div class="meta">
-          ${t.running ? '<span class="dot-run"></span>' : ""}
-          ${t.status === "open" ? `<span class="pill ${t.owner}">${OWNER[t.owner]}</span>` : `<span class="pill ${t.status}">${STATUS[t.status]}${t.status === "snoozed" && t.snooze_until ? " → " + new Date(t.snooze_until * 1000).toLocaleDateString("fr-FR", { day: "numeric", month: "short" }) : ""}</span>`}
-          <span>${rel(t.last_activity)}</span>
-        </div>
+        ${sub ? `<div class="next">${sub}</div>` : ""}
+        <div class="meta">${t.running ? '<span class="dot-run"></span>' : ""}${pill}<span>${r ? (t.cron?.last_run_at ? "ran " + rel(Date.parse(t.cron.last_run_at) / 1000) : "") : rel(t.last_activity)}</span></div>
       </div>
     </div>`;
+  };
   let html = "";
-  if (!items.length) html = `<div class="muted" style="padding:30px 10px;text-align:center">${q ? "Aucun résultat" : "Rien ici 🎉"}</div>`;
+  if (!items.length) html = `<div class="muted" style="padding:30px 10px;text-align:center">${q ? "No results" : "Nothing here 🎉"}</div>`;
   else if (state.filter === "open" && !q) {
     for (const o of ["user", "hermes", "waiting", "none"]) {
       const g = items.filter((t) => t.owner === o);
@@ -110,51 +135,72 @@ async function openTopic(id, keepScroll) {
   localStorage.setItem("sel", id);
   renderList();
   let t;
-  try { t = await api("/api/topics/" + id); } catch { $("#detail").innerHTML = '<div class="empty-state"><div class="big">🧭</div><p>Sujet introuvable</p></div>'; return; }
+  try { t = await api("/api/topics/" + id); } catch { $("#detail").innerHTML = '<div class="empty-state"><div class="big">🗼</div><p>Topic not found</p></div>'; return; }
   state.detail = t;
   renderDetail(keepScroll);
   if (t.running) attachStream(id);
 }
 
+function routineHead(t) {
+  const c = t.cron;
+  if (!c) return "";
+  return `<div class="routine-info">
+      <div><span class="k">Schedule</span>${esc(c.schedule)}</div>
+      <div><span class="k">Next run</span>${c.enabled ? esc(fmtWhen(c.next_run_at)) : "paused"}</div>
+      <div><span class="k">Last run</span>${esc(fmtWhen(c.last_run_at))} ${c.last_status ? `<span class="pill ${c.last_status === "ok" ? "done" : "dropped"}">${esc(c.last_status)}</span>` : ""}</div>
+      ${c.deliver ? `<div><span class="k">Delivered to</span>${esc(String(c.deliver).split(":")[0])}</div>` : ""}
+    </div>${c.last_error && c.last_status !== "ok" ? `<div class="box err"><h4>Last error</h4><p>${esc(String(c.last_error).slice(0, 400))}</p></div>` : ""}`;
+}
+
 function renderDetail(keepScroll) {
   const t = state.detail;
+  const r = isRoutine(t);
   const prevScroll = keepScroll ? $(".d-scroll")?.scrollTop : null;
-  const sessions = (t.sessions || []).map((s) => `<div class="sess" data-sid="${esc(s.id)}"><span>${esc(s.title || "(sans titre)")}</span><span class="when">${fmtDate(s.started_at)}</span></div>`).join("");
+  const sessions = (t.sessions || []).map((s) => `<div class="sess" data-sid="${esc(s.id)}"><span>${esc(s.title || "(untitled)")}</span><span class="when">${fmtDate(s.started_at)}</span></div>`).join("");
   const isClosed = ["done", "dropped", "snoozed"].includes(t.status);
+  const actions = r ? `
+        ${t.cron?.enabled ? `<button class="act" data-a="cron:pause">⏸️ Pause</button>` : `<button class="act primary" data-a="cron:resume">▶️ Resume</button>`}
+        <button class="act" data-a="cron:run">⚡ Run now</button>
+        <button class="act drop" data-a="cron:remove">🗑️ Delete routine</button>` : `
+        ${isClosed ? `<button class="act primary" data-a="reopen">↩︎ Reopen</button>` : ""}
+        ${t.status !== "done" ? `<button class="act done" data-a="done">✅ Done</button>` : ""}
+        ${t.status !== "snoozed" ? `<div class="menu-wrap"><button class="act" data-a="snooze">⏸️ Snooze ▾</button></div>` : ""}
+        ${t.status !== "dropped" ? `<button class="act drop" data-a="drop">🗑️ Drop</button>` : ""}
+        <button class="act" data-a="pin">${t.pinned ? "📌 Unpin" : "📌 Pin"}</button>`;
+  const quick = r ? [
+    ["How did the last runs go?", "How did the last runs of this routine go? Any failures or anything to improve?"],
+    ["Change it", "I'd like to change this routine. Show me what it does today (schedule, prompt, delivery) so we can adjust it."],
+    ["Is it still useful?", "Is this routine still useful to me? Give me your honest take and suggest keeping, changing or stopping it."],
+  ] : [
+    ["Where are we?", "Where are we on this topic? Check whether anything new happened (emails, tasks…)."],
+    ["Next step?", "What is the concrete next step, and can you take care of it?"],
+    ["Go ahead", "Go ahead and take care of the next step."],
+    ["Remind me", "Add a Todoist reminder about this topic for next week."],
+  ];
   $("#detail").innerHTML = `
     <div class="d-head">
       <div class="d-title"><span class="emo">${esc(t.emoji)}</span><h1 contenteditable="true" spellcheck="false" id="tTitle">${esc(t.title)}</h1></div>
       <div class="d-pills">
-        <span class="pill ${t.status === "open" ? "none" : t.status}">${STATUS[t.status]}</span>
-        <select id="ownerSel" title="Qui a la main">${Object.entries(OWNER).map(([k, v]) => `<option value="${k}" ${k === t.owner ? "selected" : ""}>${v}</option>`).join("")}</select>
-        <span class="muted small">· dernière activité ${rel(t.last_activity)}</span>
+        ${r ? `<span class="pill waiting">🔁 Routine</span>${cronPill(t.cron)}` : `<span class="pill ${t.status === "open" ? "none" : t.status}">${STATUS[t.status]}</span>
+        <select id="ownerSel" title="Whose move">${Object.entries(OWNER).map(([k, v]) => `<option value="${k}" ${k === t.owner ? "selected" : ""}>${v}</option>`).join("")}</select>`}
+        <span class="muted small">· last activity ${rel(t.last_activity)}</span>
       </div>
-      <div class="actions">
-        ${isClosed ? `<button class="act primary" data-a="reopen">↩︎ Rouvrir</button>` : ""}
-        ${t.status !== "done" ? `<button class="act done" data-a="done">✅ Fait</button>` : ""}
-        ${t.status !== "snoozed" ? `<div class="menu-wrap"><button class="act" data-a="snooze">⏸️ Pause ▾</button></div>` : ""}
-        ${t.status !== "dropped" ? `<button class="act drop" data-a="drop">🗑️ Drop</button>` : ""}
-        <button class="act" data-a="pin">${t.pinned ? "📌 Désépingler" : "📌 Épingler"}</button>
-      </div>
+      <div class="actions">${actions}</div>
     </div>
     <div class="d-scroll">
       <div class="d-info">
-        ${t.summary ? `<div class="box"><h4>Où on en est</h4><p>${esc(t.summary)}</p></div>` : ""}
-        ${t.next_step ? `<div class="box next"><h4>Prochaine étape</h4><p>${esc(t.next_step)}</p></div>` : ""}
-        ${sessions ? `<details class="sessions"><summary>${t.sessions.length} conversation${t.sessions.length > 1 ? "s" : ""} liée${t.sessions.length > 1 ? "s" : ""}</summary>${sessions}</details>` : ""}
+        ${r ? routineHead(t) : ""}
+        ${t.summary ? `<div class="box"><h4>${r ? "What it does" : "Where we are"}</h4><p>${esc(t.summary)}</p></div>` : ""}
+        ${t.next_step ? `<div class="box next"><h4>${r ? "Pending tweak" : "Next step"}</h4><p>${esc(t.next_step)}</p></div>` : ""}
+        ${sessions ? `<details class="sessions"><summary>${t.sessions.length} linked conversation${t.sessions.length > 1 ? "s" : ""}</summary>${sessions}</details>` : ""}
       </div>
       <div class="chat" id="chat"></div>
     </div>
     <div class="composer">
-      <div class="quick">
-        <button data-q="Où on en est sur ce sujet ? Vérifie s'il y a du nouveau (mails, tâches…).">Où on en est ?</button>
-        <button data-q="Quelle est la prochaine étape concrète, et est-ce que tu peux t'en charger ?">Prochaine étape ?</button>
-        <button data-q="Vas-y, occupe-toi de la prochaine étape.">Vas-y, fais-le</button>
-        <button data-q="Rappelle-moi ce sujet dans Todoist pour la semaine prochaine.">Rappel Todoist</button>
-      </div>
+      <div class="quick">${quick.map(([l, q]) => `<button data-q="${esc(q)}">${esc(l)}</button>`).join("")}</div>
       <div class="input-row">
-        <textarea id="input" rows="1" placeholder="Parle-moi de ce sujet…"></textarea>
-        <button class="send" id="sendBtn">Envoyer</button>
+        <textarea id="input" rows="1" placeholder="${r ? "Ask about or adjust this routine…" : "Talk to Hermes about this topic…"}"></textarea>
+        <button class="send" id="sendBtn">Send</button>
       </div>
     </div>`;
   renderChat();
@@ -164,8 +210,9 @@ function renderDetail(keepScroll) {
   const title = $("#tTitle");
   title.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); title.blur(); } };
   title.onblur = async () => { const v = title.textContent.trim(); if (v && v !== t.title) { await api("/api/topics/" + t.id, { method: "PATCH", body: { title: v } }); t.title = v; loadTopics(); } };
-  $("#ownerSel").onchange = async (e) => { await api("/api/topics/" + t.id, { method: "PATCH", body: { owner: e.target.value } }); t.owner = e.target.value; loadTopics(); };
-  document.querySelectorAll(".actions .act").forEach((b) => (b.onclick = (e) => action(b.dataset.a, b, e)));
+  const os = $("#ownerSel");
+  if (os) os.onchange = async (e) => { await api("/api/topics/" + t.id, { method: "PATCH", body: { owner: e.target.value } }); t.owner = e.target.value; loadTopics(); };
+  document.querySelectorAll(".actions .act").forEach((b) => (b.onclick = () => action(b.dataset.a, b)));
   document.querySelectorAll(".sess").forEach((s) => (s.onclick = () => showSession(s.dataset.sid)));
   document.querySelectorAll(".quick button").forEach((b) => (b.onclick = () => send(b.dataset.q)));
   const input = $("#input");
@@ -178,24 +225,24 @@ function renderDetail(keepScroll) {
 function renderChat() {
   const t = state.detail;
   const msgs = t.messages || [];
-  let html = msgs.length ? "" : `<div class="hint">Pose une question ou donne une consigne : Hermes reprend tout le contexte du sujet.</div>`;
+  let html = msgs.length ? "" : `<div class="hint">Ask a question or give an instruction: Hermes gets the full context of this ${isRoutine(t) ? "routine" : "topic"}.</div>`;
   for (const m of msgs) {
     if (m.role === "user") html += `<div class="msg user">${esc(m.content)}</div>`;
     else {
       const tools = JSON.parse(m.tools || "[]");
       const uniq = [...new Set(tools)];
-      html += `<div class="msg assistant">${uniq.length ? `<div class="tools">${uniq.map((n) => `<span class="tool-chip">⚙︎ ${esc(n)}${tools.filter((x) => x === n).length > 1 ? " ×" + tools.filter((x) => x === n).length : ""}</span>`).join("")}</div>` : ""}<div class="md">${md(m.content)}</div></div>`;
+      html += `<div class="msg assistant">${uniq.length ? `<div class="tools">${uniq.map((n) => { const k = tools.filter((x) => x === n).length; return `<span class="tool-chip">⚙︎ ${esc(n)}${k > 1 ? " ×" + k : ""}</span>`; }).join("")}</div>` : ""}<div class="md">${md(m.content)}</div></div>`;
     }
   }
   if (state.live && state.live.topic === t.id) {
     const l = state.live;
-    html += `<div class="msg assistant" id="liveMsg">${l.tools.length ? `<div class="tools">${l.tools.map((x) => `<span class="tool-chip ${x.error ? "err" : ""}">${x.done ? "✓" : "…"} ${esc(x.name)}${x.preview ? " · " + esc(x.preview) : ""}</span>`).join("")}</div>` : ""}${l.text ? `<div class="md">${md(l.text)}</div>` : `<div class="typing"><span class="dot-run"></span>${esc(l.status || "Hermes réfléchit…")}</div>`}</div>`;
+    html += `<div class="msg assistant">${l.tools.length ? `<div class="tools">${l.tools.map((x) => `<span class="tool-chip ${x.error ? "err" : ""}">${x.done ? "✓" : "…"} ${esc(x.name)}${x.preview ? " · " + esc(x.preview) : ""}</span>`).join("")}</div>` : ""}${l.text ? `<div class="md">${md(l.text)}</div>` : `<div class="typing"><span class="dot-run"></span>${esc(l.status || "Hermes is thinking…")}</div>`}</div>`;
   }
   $("#chat").innerHTML = html;
 }
 
 function scrollChat() { const s = $(".d-scroll"); if (s) s.scrollTop = s.scrollHeight; }
-function updateSendBtn() { const b = $("#sendBtn"); if (!b) return; const live = state.live && state.live.topic === state.detail?.id; b.textContent = live ? "■ Stop" : "Envoyer"; b.classList.toggle("stop", !!live); }
+function updateSendBtn() { const b = $("#sendBtn"); if (!b) return; const live = state.live && state.live.topic === state.detail?.id; b.textContent = live ? "■ Stop" : "Send"; b.classList.toggle("stop", !!live); }
 
 async function send(text, display) {
   text = (text || "").trim();
@@ -248,15 +295,34 @@ async function setStatus(status, extra = {}) {
   return prev;
 }
 
+async function cron(actionName) {
+  const t = state.detail;
+  try { await api(`/api/topics/${t.id}/cron`, { method: "POST", body: { action: actionName } }); }
+  catch (e) { toast("⚠️ " + e.message); return; }
+  await loadTopics();
+  await openTopic(t.id, true);
+  toast({ pause: "Routine paused", resume: "Routine resumed", run: "Routine will run on the next scheduler tick", remove: "Routine deleted" }[actionName]);
+}
+
 async function action(a, btn) {
   const t = state.detail;
-  if (a === "reopen") { await setStatus("open"); toast("Sujet rouvert"); }
-  if (a === "done") { const prev = await setStatus("done"); toast("Marqué comme fait", () => setStatus(prev.status)); }
+  if (a.startsWith("cron:")) {
+    const what = a.slice(5);
+    if (what === "remove") {
+      modal(`<header>🗑️ Delete the routine “${esc(t.title)}”?</header>
+        <div class="content"><p>The Hermes cron job will be removed and will stop running. This cannot be undone (you can ask Hermes to recreate it later).</p></div>
+        <footer><button class="act" data-m="cancel">Cancel</button><button class="act primary" data-m="ok">Delete</button></footer>`,
+        async (c) => { if (c === "ok") await cron("remove"); });
+    } else await cron(what);
+    return;
+  }
+  if (a === "reopen") { await setStatus("open"); toast("Topic reopened"); }
+  if (a === "done") { const prev = await setStatus("done"); toast("Marked as done", () => setStatus(prev.status)); }
   if (a === "pin") { await api("/api/topics/" + t.id, { method: "PATCH", body: { pinned: !t.pinned } }); await loadTopics(); openTopic(t.id, true); }
   if (a === "snooze") {
     const wrap = btn.parentElement;
     if ($(".menu", wrap)) { $(".menu", wrap).remove(); return; }
-    const opts = [["Demain", 1], ["Dans 3 jours", 3], ["Dans une semaine", 7], ["Dans un mois", 30]];
+    const opts = [["Tomorrow", 1], ["In 3 days", 3], ["In a week", 7], ["In a month", 30]];
     const m = document.createElement("div");
     m.className = "menu";
     m.innerHTML = opts.map(([l, d]) => `<button data-d="${d}">${l}</button>`).join("");
@@ -264,31 +330,31 @@ async function action(a, btn) {
     m.querySelectorAll("button").forEach((b) => (b.onclick = async () => {
       const until = new Date(); until.setDate(until.getDate() + +b.dataset.d); until.setHours(8, 0, 0, 0);
       await setStatus("snoozed", { snooze_until: until.getTime() / 1000 });
-      toast(`En pause jusqu'au ${until.toLocaleDateString("fr-FR", { day: "numeric", month: "long" })}`);
+      toast(`Snoozed until ${until.toLocaleDateString(LOCALE, { day: "numeric", month: "long" })}`);
     }));
     setTimeout(() => document.addEventListener("click", function h(e) { if (!wrap.contains(e.target)) { m.remove(); document.removeEventListener("click", h); } }), 0);
   }
   if (a === "drop") {
     modal(`
-      <header>🗑️ Dropper « ${esc(t.title)} » ?</header>
-      <div class="content"><p>Le sujet disparaît de ta liste (tu le retrouves dans « Droppés »).</p>
-      <p>Je peux aussi regarder ce qui y est encore lié de mon côté (tâches Todoist, crons, brouillons, rappels) et te proposer de le nettoyer. Je ne supprime rien sans ta confirmation.</p></div>
-      <footer><button class="act" data-m="cancel">Annuler</button><button class="act" data-m="hide">Juste masquer</button><button class="act primary" data-m="clean">Masquer et proposer le nettoyage</button></footer>`,
+      <header>🗑️ Drop “${esc(t.title)}”?</header>
+      <div class="content"><p>The topic leaves your list (you'll still find it under “Dropped”).</p>
+      <p>Hermes can also look at what is still attached to it on its side (Todoist tasks, cron jobs, drafts, reminders) and suggest a cleanup. Nothing is deleted without your confirmation.</p></div>
+      <footer><button class="act" data-m="cancel">Cancel</button><button class="act" data-m="hide">Just hide it</button><button class="act primary" data-m="clean">Hide and suggest a cleanup</button></footer>`,
       async (choice) => {
         if (choice === "cancel") return;
         const prev = await setStatus("dropped");
         if (choice === "clean") {
-          send("Je droppe ce sujet, il ne m'intéresse plus. Liste ce qui y est encore lié de ton côté (tâches Todoist, crons Hermes, brouillons Gmail, rappels, fichiers temporaires) et propose-moi le nettoyage. Ne supprime rien sans ma confirmation explicite.", "🗑️ Je droppe ce sujet : regarde ce qui y est encore lié et propose-moi le nettoyage.");
-        } else toast("Sujet droppé", () => setStatus(prev.status));
+          send("I'm dropping this topic, I'm no longer interested. List what is still attached to it on your side (Todoist tasks, Hermes cron jobs, Gmail drafts, reminders, temp files) and suggest a cleanup. Don't delete anything without my explicit confirmation.", "🗑️ I'm dropping this topic: check what's still attached to it and suggest a cleanup.");
+        } else toast("Topic dropped", () => setStatus(prev.status));
       });
   }
 }
 
 $("#newTopic").onclick = () => {
   modal(`
-    <header>✨ Nouveau sujet</header>
-    <div class="content"><input type="text" id="newTitle" placeholder="Ex : Trouver une école pour la rentrée"><p class="muted small">Tu pourras ensuite en parler directement avec moi.</p></div>
-    <footer><button class="act" data-m="cancel">Annuler</button><button class="act primary" data-m="ok">Créer</button></footer>`,
+    <header>✨ New topic</header>
+    <div class="content"><input type="text" id="newTitle" placeholder="e.g. Find a school for September"><p class="muted small">You can then talk about it with Hermes right away.</p></div>
+    <footer><button class="act" data-m="cancel">Cancel</button><button class="act primary" data-m="ok">Create</button></footer>`,
     async (c) => {
       if (c !== "ok") return;
       const title = $("#newTitle").value.trim();
@@ -296,7 +362,7 @@ $("#newTopic").onclick = () => {
       const t = await api("/api/topics", { method: "POST", body: { title } });
       state.filter = "open"; await loadTopics(); openTopic(t.id);
       setTimeout(() => $("#input")?.focus(), 200);
-    });
+    }, false, () => $("#newTitle").value);
   setTimeout(() => { const i = $("#newTitle"); i.focus(); i.onkeydown = (e) => e.key === "Enter" && $('[data-m="ok"]').click(); }, 30);
 };
 
@@ -304,8 +370,8 @@ $("#refreshBtn").onclick = async () => { const r = await api("/api/refresh", { m
 
 async function showSession(sid) {
   const data = await api("/api/sessions/" + encodeURIComponent(sid));
-  const msgs = data.messages.map((m) => `<div class="tr-msg"><div class="who">${m.role === "user" ? "Toi" : "Hermes"} · ${new Date(m.timestamp * 1000).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</div><div class="md">${m.role === "user" ? esc(m.content).replace(/\n/g, "<br>") : md(m.content)}</div></div>`).join("");
-  modal(`<header><span>${esc(data.meta?.title || "Conversation")}</span><button class="x" data-m="cancel">✕</button></header><div class="content">${msgs || '<p class="muted">Vide</p>'}</div>`, null, true);
+  const msgs = data.messages.map((m) => `<div class="tr-msg"><div class="who">${m.role === "user" ? "You" : "Hermes"} · ${new Date(m.timestamp * 1000).toLocaleString(LOCALE, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</div><div class="md">${m.role === "user" ? esc(m.content).replace(/\n/g, "<br>") : md(m.content)}</div></div>`).join("");
+  modal(`<header><span>${esc(data.meta?.title || "Conversation")}</span><button class="x" data-m="cancel">✕</button></header><div class="content">${msgs || '<p class="muted">Empty</p>'}</div>`, null, true);
 }
 
 // ------------------------------------------------------------------ modal / toast
@@ -323,7 +389,7 @@ function modal(html, cb, wide) {
 let toastTimer;
 function toast(text, undo) {
   const el = $("#toast");
-  el.innerHTML = `<span>${esc(text)}</span>${undo ? '<button id="undoBtn">Annuler</button>' : ""}`;
+  el.innerHTML = `<span>${esc(text)}</span>${undo ? '<button id="undoBtn">Undo</button>' : ""}`;
   el.classList.remove("hidden");
   if (undo) $("#undoBtn").onclick = async () => { el.classList.add("hidden"); await undo(); };
   clearTimeout(toastTimer);

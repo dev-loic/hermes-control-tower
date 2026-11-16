@@ -67,55 +67,62 @@ def session_digest(sid, title, started, last, chat_topic=None):
     users = [u for u in users if not u.startswith("[IMPORTANT: You are running as a scheduled cron job")]
     if len(users) > 10:
         users = users[:6] + ["…"] + users[-4:]
-    lines = [f"title: {title or '(sans titre)'} | du {_day(started)} au {_day(last)}"]
+    lines = [f"title: {title or '(untitled)'} | from {_day(started)} to {_day(last)}"]
     if chat_topic:
-        lines.append(f"(conversation ouverte depuis Hermes Control Tower pour le sujet {chat_topic})")
+        lines.append(f"(conversation opened from Hermes Control Tower for the topic {chat_topic})")
     for u in users:
         lines.append(store.USER_NAME.upper() + ": " + _clip(u, 350))
     if assistants:
         if len(assistants) > 1:
-            lines.append("HERMES (avant-dernière réponse): " + _clip(assistants[-2], 300))
-        lines.append("HERMES (dernière réponse): " + _clip(assistants[-1], 900))
+            lines.append("HERMES (previous answer): " + _clip(assistants[-2], 300))
+        lines.append("HERMES (last answer): " + _clip(assistants[-1], 900))
     return "\n".join(lines)
 
 
-PROMPT = """Tu indexes les conversations entre {user} et toi (Hermes) en SUJETS, pour Hermes Control Tower, l'appli de suivi de {user}.
-Un sujet = une affaire suivie dans le temps (ex : « Renouvellement du passeport », « Déménagement », « Recherche d'emploi », « Réclamation auprès d'une compagnie aérienne »). Plusieurs conversations peuvent appartenir au même sujet ; une conversation peut toucher 2 sujets au maximum.
-N'UTILISE AUCUN OUTIL. Réponds uniquement avec un objet JSON valide, sans texte autour, sans bloc de code.
+PROMPT = """You index the conversations between {user} and you (Hermes) into TOPICS for Hermes Control Tower, {user}'s tracking app.
+A topic is a matter followed over time (e.g. "Passport renewal", "Moving out", "Job search", "Refund claim with an airline"). Several conversations can belong to the same topic; one conversation can touch at most 2 topics.
+DO NOT USE ANY TOOL. Answer only with a valid JSON object, no surrounding text, no code fence.
 
-Date du jour : {today}
+Today: {today}
 
-SUJETS EXISTANTS (rattache-y les conversations quand c'est le même sujet, plutôt que d'en créer un nouveau) :
+EXISTING TOPICS (attach conversations to them when it is the same topic rather than creating a new one).
+Entries marked "routine" are Hermes' recurring automated jobs (cron): any conversation that tunes, fixes or discusses a routine (its content, schedule, failures) belongs to that routine — NEVER create a separate topic for an existing routine:
 {topics}
 
-CONVERSATIONS À INDEXER :
+CONVERSATIONS TO INDEX:
 {sessions}
 
-Règles :
-- Les questions ponctuelles sans suite (une info rapide, une curiosité, un test) vont dans "ignored", sauf si elles complètent un sujet existant.
-- Titres courts en français (max 60 caractères), concrets, sans emoji dans le titre ; un emoji pertinent à part.
-- summary : 1 à 3 phrases, en français, simple, où on en est concrètement (faits, dates, montants utiles).
-- next_step : la prochaine action concrète, en une phrase ; vide si rien.
-- owner : qui doit agir maintenant — "user" ({user} doit faire/répondre/décider), "hermes" (une question ou une action de Hermes est en attente), "waiting" (on attend un tiers), "none" (rien à faire).
-- status : "open" ou "done" (done seulement si c'est clairement terminé).
-- Pour un sujet existant, renvoie les champs mis à jour en tenant compte de son résumé actuel et des nouvelles conversations.
-- last_activity : date (YYYY-MM-DD) de la dernière conversation du sujet.
+Rules:
+- Write titles, summaries and next steps in {language}. If an existing topic's title, summary or next step is in another language, return it translated.
+- One-off questions with no follow-up (a quick fact, a curiosity, a test) go to "ignored", unless they add to an existing topic.
+- Short, concrete titles (max 60 characters), no emoji in the title; one relevant emoji separately.
+- summary: 1 to 3 plain sentences on where things concretely stand (useful facts, dates, amounts).
+- next_step: the next concrete action in one sentence; empty if none.
+- owner: who must act now — "user" ({user} must do/answer/decide), "hermes" (a question or action from Hermes is pending), "waiting" (waiting on a third party), "none" (nothing to do).
+- status: "open" or "done" (done only if clearly finished). For a routine keep "open"; its summary describes what it does and its latest tweaks, its next_step a pending tweak (else empty), owner "none" unless someone must act.
+- For an existing topic, return the updated fields taking its current summary and the new conversations into account.
+- last_activity: date (YYYY-MM-DD) of the topic's latest conversation.
 
-Format exact :
-{{"topics": [{{"id": "<id existant ou new_1, new_2…>", "title": "...", "emoji": "🏝️", "summary": "...", "next_step": "...", "owner": "user", "status": "open", "last_activity": "YYYY-MM-DD", "sessions": ["S1", "S4"]}}], "ignored": ["S2"]}}
-Ne renvoie dans "topics" que les sujets touchés par les conversations ci-dessus.
+Exact format:
+{{"topics": [{{"id": "<existing id or new_1, new_2…>", "title": "...", "emoji": "🏝️", "summary": "...", "next_step": "...", "owner": "user", "status": "open", "last_activity": "YYYY-MM-DD", "sessions": ["S1", "S4"]}}], "ignored": ["S2"]}}
+Only return in "topics" the topics touched by the conversations above.
 """
 
 
 def _topics_block(conn):
+    jobs = store.sync_routines(conn)
     rows = conn.execute("SELECT * FROM topics ORDER BY coalesce(last_activity, updated_at) DESC").fetchall()
     if not rows:
-        return "(aucun)"
+        return "(none)"
     out = []
     for t in rows:
-        out.append(json.dumps({"id": t["id"], "title": t["title"], "status": t["status"], "owner": t["owner"],
-                               "summary": t["summary"], "next_step": t["next_step"],
-                               "last_activity": _day(t["last_activity"])}, ensure_ascii=False))
+        item = {"id": t["id"], "title": t["title"], "status": t["status"], "owner": t["owner"],
+                "summary": t["summary"], "next_step": t["next_step"], "last_activity": _day(t["last_activity"])}
+        if t["cron_job_id"]:
+            job = jobs.get(t["cron_job_id"])
+            item = {"routine": True, **item, "cron": (job or {}).get("name"),
+                    "schedule": store.schedule_text(job) if job else None}
+        out.append(json.dumps(item, ensure_ascii=False))
     return "\n".join(out)
 
 
@@ -170,6 +177,8 @@ def apply_result(conn, result, smap, cand_by_sid):
                  t.get("next_step", ""), now, now, last_ts, now))
         else:
             new_status = row["status"]
+            if row["cron_job_id"]:
+                status = row["status"]  # routines follow their cron job, not the LLM
             fresh = [s for s in sids if cand_by_sid[s]["last"] > (row["status_changed_at"] or 0) + 60]
             if row["status"] == "open" and status == "done":
                 new_status = "done"
@@ -200,7 +209,7 @@ def refresh(progress=lambda msg: None):
         chat_map = {r["chat_session_id"]: r["title"] for r in
                     conn.execute("SELECT chat_session_id, title FROM topics WHERE chat_session_id IS NOT NULL")}
         if not cands:
-            progress("Rien de nouveau")
+            progress("Nothing new")
             store.set_meta(conn, "last_refresh", time.time())
             return {"indexed": 0}
         digests = [(c, session_digest(c["id"], c["title"], c["started_at"], c["last"], chat_map.get(c["id"])))
@@ -216,15 +225,15 @@ def refresh(progress=lambda msg: None):
             batches.append(cur)
         done = 0
         for i, batch in enumerate(batches, 1):
-            progress(f"Analyse {i}/{len(batches)} ({len(batch)} conversations)")
+            progress(f"Batch {i}/{len(batches)} ({len(batch)} conversations)")
             smap = {f"S{j}": c["id"] for j, (c, _) in enumerate(batch, 1)}
             block = "\n\n".join(f"[S{j}]\n{d}" for j, (_, d) in enumerate(batch, 1))
-            prompt = PROMPT.format(user=store.USER_NAME, today=datetime.now().strftime("%Y-%m-%d"), topics=_topics_block(conn), sessions=block)
+            prompt = PROMPT.format(user=store.USER_NAME, language=store.CONTENT_LANG, today=datetime.now().strftime("%Y-%m-%d"), topics=_topics_block(conn), sessions=block)
             result = ask_hermes(prompt, conn)
             apply_result(conn, result, smap, {c["id"]: c for c, _ in batch})
             done += len(batch)
         store.set_meta(conn, "last_refresh", time.time())
-        progress(f"{done} conversations analysées")
+        progress(f"{done} conversations analysed")
         return {"indexed": done}
     finally:
         conn.close()

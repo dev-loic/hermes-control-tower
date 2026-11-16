@@ -3,7 +3,7 @@
 # Usage: ./deploy/install-macos.sh "Your first name"
 set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DEFAULT_NAME="l'utilisateur"
+DEFAULT_NAME="the user"
 USER_NAME="${1:-${HCT_USER_NAME:-$DEFAULT_NAME}}"
 HERMES_BIN="$(command -v hermes)"
 PYTHON="${HCT_PYTHON:-$HOME/.hermes/hermes-agent/venv/bin/python}"

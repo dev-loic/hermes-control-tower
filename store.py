@@ -9,7 +9,8 @@ from pathlib import Path
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 DATA_DIR = Path(os.environ.get("HCT_DATA_DIR", HERMES_HOME / "control-tower"))
 DB_PATH = DATA_DIR / "control-tower.db"
-USER_NAME = os.environ.get("HCT_USER_NAME", "l'utilisateur")
+USER_NAME = os.environ.get("HCT_USER_NAME", "the user")
+CONTENT_LANG = os.environ.get("HCT_LANGUAGE", "English")
 STATE_DB = HERMES_HOME / "state.db"
 
 SCHEMA = """
@@ -61,7 +62,82 @@ def connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(topics)")}
+    if "cron_job_id" not in cols:
+        conn.execute("ALTER TABLE topics ADD COLUMN cron_job_id TEXT")
+        conn.commit()
     return conn
+
+
+# ---------------------------------------------------------------- routines (Hermes cron jobs)
+CRON_JOBS = HERMES_HOME / "cron" / "jobs.json"
+DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def cron_jobs() -> dict:
+    try:
+        data = json.loads(CRON_JOBS.read_text())
+    except (OSError, ValueError):
+        return {}
+    jobs = data.get("jobs", data) if isinstance(data, dict) else data
+    jobs = jobs.values() if isinstance(jobs, dict) else jobs
+    return {j["id"]: j for j in jobs if isinstance(j, dict) and j.get("id")}
+
+
+def schedule_text(job) -> str:
+    s = job.get("schedule") or {}
+    if s.get("kind") == "interval" and s.get("minutes"):
+        m = int(s["minutes"])
+        return f"Every {m} min" if m < 60 or m % 60 else ("Every hour" if m == 60 else f"Every {m // 60} h")
+    expr = (s.get("expr") or "").split()
+    if len(expr) == 5:
+        mi, h, dom, mon, dow = expr
+        if mi.isdigit() and h.isdigit():
+            at = f"{int(h):02d}:{int(mi):02d}"
+            if dom == "*" and mon == "*" and dow == "*":
+                return f"Every day at {at}"
+            if dom == "*" and mon == "*" and dow.isdigit():
+                return f"Every {DAYS[int(dow)]} at {at}"
+            if dom == "*" and mon == "*" and dow in ("1-5", "mon-fri"):
+                return f"Weekdays at {at}"
+            if dom.isdigit() and mon == "*" and dow == "*":
+                return f"Monthly on day {dom} at {at}"
+    return s.get("display") or "Scheduled"
+
+
+def cron_info(job) -> dict:
+    return {"id": job["id"], "name": job.get("name"), "schedule": schedule_text(job),
+            "enabled": bool(job.get("enabled", True)) and job.get("state") != "paused",
+            "state": job.get("state"), "next_run_at": job.get("next_run_at"), "last_run_at": job.get("last_run_at"),
+            "last_status": job.get("last_status"), "last_error": job.get("last_error"),
+            "deliver": job.get("deliver"), "failure_streak": job.get("failure_streak") or 0}
+
+
+def sync_routines(conn):
+    """One routine (topic row with cron_job_id) per Hermes cron job; a removed job closes its routine."""
+    jobs = cron_jobs()
+    known = {r["cron_job_id"]: r["id"] for r in conn.execute("SELECT id, cron_job_id FROM topics WHERE cron_job_id IS NOT NULL")}
+    now = time.time()
+    for jid, job in jobs.items():
+        if jid not in known:
+            conn.execute("INSERT INTO topics(id,title,emoji,status,owner,summary,next_step,created_at,updated_at,last_activity,"
+                         "status_changed_at,cron_job_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (new_topic_id(), (job.get("name") or "Routine")[:80], "🔁", "open", "none", "", "", now, now,
+                          job.get("created_at") and _iso_ts(job.get("created_at")) or now, now, jid))
+    for jid, tid in known.items():
+        if jid not in jobs:
+            conn.execute("UPDATE topics SET status='done', status_changed_at=?, cron_job_id=NULL, "
+                         "summary = summary || ' (routine deleted)' WHERE id=?", (now, tid))
+    conn.commit()
+    return jobs
+
+
+def _iso_ts(v):
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(v).timestamp() if isinstance(v, str) else float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def state_db() -> sqlite3.Connection:

@@ -172,3 +172,10 @@ details.sessions[open] summary::before { content: "▾ "; }
   #app { grid-template-columns: 190px 290px 1fr; }
   .d-head, .d-info, .chat, .composer { padding-left: 18px; padding-right: 18px; }
 }
+
+/* routines */
+.routine-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.routine-info > div { border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; background: var(--panel-2); font-weight: 500; }
+.routine-info .k { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.box.err { border-left: 3px solid var(--red); }
+.alert-dot { background: var(--red); color: #fff; border-radius: 99px; font-size: 10px; font-weight: 700; padding: 0 6px; margin-left: 4px; }
