@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes Control Tower</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗼</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">🗼</span> Control Tower</div>
+    <button class="new-btn" id="newTopic">＋ Nouveau sujet</button>
+    <nav id="filters"></nav>
+    <div class="sidebar-foot">
+      <button class="ghost" id="refreshBtn" title="Relire les nouvelles conversations">↻ Mettre à jour</button>
+      <div class="muted small" id="refreshInfo"></div>
+    </div>
+  </aside>
+
+  <section class="list-pane">
+    <div class="search"><input id="search" placeholder="Rechercher un sujet…" autocomplete="off"></div>
+    <div id="list"></div>
+  </section>
+
+  <main class="detail" id="detail">
+    <div class="empty-state">
+      <div class="big">🧭</div>
+      <p>Choisis un sujet à gauche<br><span class="muted">ou crée-en un nouveau.</span></p>
+    </div>
+  </main>
+</div>
+
+<div class="modal-bg hidden" id="modalBg"><div class="modal" id="modal"></div></div>
+<div class="toast hidden" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

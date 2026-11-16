@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.hermes.control-tower</string>
+  <key>ProgramArguments</key><array>
+    <string>__PYTHON__</string>
+    <string>__APP_DIR__/server.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>__APP_DIR__</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>__HERMES_BIN_DIR__:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HERMES_BIN</key><string>__HERMES_BIN__</string>
+    <key>HCT_USER_NAME</key><string>__USER_NAME__</string>
+    <key>HOME</key><string>__HOME__</string>
+    <key>LANG</key><string>fr_FR.UTF-8</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.hermes/control-tower/server.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.hermes/control-tower/server.log</string>
+</dict></plist>
