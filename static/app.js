@@ -391,8 +391,8 @@ $("#newTopic").onclick = () => {
       const t = await api("/api/topics", { method: "POST", body: { title } });
       setScope("all"); state.status = "open"; await loadTopics(); openTopic(t.id);
       setTimeout(() => $("#input")?.focus(), 200);
-    }, false, () => $("#newTitle").value);
-  setTimeout(() => { const i = $("#newTitle"); i.focus(); i.onkeydown = (e) => e.key === "Enter" && $('[data-m="ok"]').click(); }, 30);
+    });
+  setTimeout(() => { const i = $("#newTitle"); i.focus(); i.onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); $('[data-m="ok"]').click(); } }; }, 30);
 };
 
 function folderModal(folder, assignTopic) {
