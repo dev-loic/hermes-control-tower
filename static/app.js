@@ -411,7 +411,7 @@ function folderModal(folder, assignTopic) {
       await loadTopics();
       if (state.sel) openTopic(state.sel, true);
     });
-  setTimeout(() => { const i = $("#fName"); i.focus(); i.onkeydown = (e) => e.key === "Enter" && $('[data-m="ok"]').click(); }, 30);
+  setTimeout(() => { const i = $("#fName"); i.focus(); i.onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); $('[data-m="ok"]').click(); } }; }, 30);
 }
 
 $("#refreshBtn").onclick = async () => { const r = await api("/api/refresh", { method: "POST" }); renderRefresh(r.refresh); pollRefresh(); };
