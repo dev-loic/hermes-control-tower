@@ -89,6 +89,9 @@ EXISTING TOPICS (attach conversations to them when it is the same topic rather t
 Entries marked "routine" are Hermes' recurring automated jobs (cron): any conversation that tunes, fixes or discusses a routine (its content, schedule, failures) belongs to that routine — NEVER create a separate topic for an existing routine:
 {topics}
 
+FOLDERS ({user} groups topics by theme):
+{folders}
+
 CONVERSATIONS TO INDEX:
 {sessions}
 
@@ -101,10 +104,11 @@ Rules:
 - owner: who must act now — "user" ({user} must do/answer/decide), "hermes" (a question or action from Hermes is pending), "waiting" (waiting on a third party), "none" (nothing to do).
 - status: "open" or "done" (done only if clearly finished). For a routine keep "open"; its summary describes what it does and its latest tweaks, its next_step a pending tweak (else empty), owner "none" unless someone must act.
 - For an existing topic, return the updated fields taking its current summary and the new conversations into account.
+- folder: for every returned topic, the id of the folder it belongs to (see FOLDERS), or null if none fits. Keep a topic's current folder unless it clearly no longer fits.
 - last_activity: date (YYYY-MM-DD) of the topic's latest conversation.
 
 Exact format:
-{{"topics": [{{"id": "<existing id or new_1, new_2…>", "title": "...", "emoji": "🏝️", "summary": "...", "next_step": "...", "owner": "user", "status": "open", "last_activity": "YYYY-MM-DD", "sessions": ["S1", "S4"]}}], "ignored": ["S2"]}}
+{{"topics": [{{"id": "<existing id or new_1, new_2…>", "title": "...", "emoji": "🏝️", "summary": "...", "next_step": "...", "owner": "user", "status": "open", "last_activity": "YYYY-MM-DD", "folder": "f_xxx", "sessions": ["S1", "S4"]}}], "ignored": ["S2"]}}
 Only return in "topics" the topics touched by the conversations above.
 """
 
@@ -117,13 +121,23 @@ def _topics_block(conn):
     out = []
     for t in rows:
         item = {"id": t["id"], "title": t["title"], "status": t["status"], "owner": t["owner"],
-                "summary": t["summary"], "next_step": t["next_step"], "last_activity": _day(t["last_activity"])}
+                "summary": t["summary"], "next_step": t["next_step"], "last_activity": _day(t["last_activity"]),
+                "folder": t["folder_id"]}
         if t["cron_job_id"]:
             job = jobs.get(t["cron_job_id"])
             item = {"routine": True, **item, "cron": (job or {}).get("name"),
                     "schedule": store.schedule_text(job) if job else None}
         out.append(json.dumps(item, ensure_ascii=False))
     return "\n".join(out)
+
+
+def _folders_block(conn):
+    rows = conn.execute("SELECT id, name, emoji FROM folders ORDER BY position").fetchall()
+    out = []
+    for f in rows:
+        titles = [r[0] for r in conn.execute("SELECT title FROM topics WHERE folder_id=? ORDER BY last_activity DESC LIMIT 8", (f["id"],))]
+        out.append(json.dumps({"id": f["id"], "name": f["name"], "examples": titles}, ensure_ascii=False))
+    return "\n".join(out) or "(none)"
 
 
 def _extract_json(text):
@@ -156,6 +170,7 @@ def ask_hermes(prompt, conn, timeout=900):
 
 def apply_result(conn, result, smap, cand_by_sid):
     now = time.time()
+    folder_ids = {r[0] for r in conn.execute("SELECT id FROM folders")}
     for t in result.get("topics", []):
         sids = [smap[s] for s in t.get("sessions", []) if s in smap]
         tid = t.get("id") or ""
@@ -192,6 +207,10 @@ def apply_result(conn, result, smap, cand_by_sid):
                 "status_changed_at=CASE WHEN status<>? THEN ? ELSE status_changed_at END WHERE id=?",
                 (title, t.get("emoji") or row["emoji"], t.get("summary", row["summary"]),
                  t.get("next_step", row["next_step"]), owner, new_status, now, last_ts, new_status, now, tid))
+        # auto-file: only topics without a folder (never override a folder set by the user)
+        fid = t.get("folder")
+        if fid in folder_ids and not (row is not None and row["folder_id"]) and not (row is not None and row["cron_job_id"]):
+            conn.execute("UPDATE topics SET folder_id=? WHERE id=? AND folder_id IS NULL", (fid, tid))
         for s in sids:
             conn.execute("INSERT OR IGNORE INTO topic_sessions(topic_id, session_id) VALUES(?,?)", (tid, s))
     ignored = {smap[s] for s in result.get("ignored", []) if s in smap}
@@ -228,7 +247,7 @@ def refresh(progress=lambda msg: None):
             progress(f"Batch {i}/{len(batches)} ({len(batch)} conversations)")
             smap = {f"S{j}": c["id"] for j, (c, _) in enumerate(batch, 1)}
             block = "\n\n".join(f"[S{j}]\n{d}" for j, (_, d) in enumerate(batch, 1))
-            prompt = PROMPT.format(user=store.USER_NAME, language=store.CONTENT_LANG, today=datetime.now().strftime("%Y-%m-%d"), topics=_topics_block(conn), sessions=block)
+            prompt = PROMPT.format(user=store.USER_NAME, language=store.CONTENT_LANG, today=datetime.now().strftime("%Y-%m-%d"), topics=_topics_block(conn), folders=_folders_block(conn), sessions=block)
             result = ask_hermes(prompt, conn)
             apply_result(conn, result, smap, {c["id"]: c for c, _ in batch})
             done += len(batch)
