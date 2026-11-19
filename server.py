@@ -472,7 +472,12 @@ async def refresh_get(request):
 
 
 async def index(request):
-    return web.FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+    """Version static URLs by mtime so a stale browser cache can never serve old JS/CSS."""
+    html = (STATIC / "index.html").read_text()
+    for f in ("app.js", "style.css"):
+        v = int((STATIC / f).stat().st_mtime)
+        html = html.replace(f"/static/{f}\"", f"/static/{f}?v={v}\"")
+    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------- local-only guard
