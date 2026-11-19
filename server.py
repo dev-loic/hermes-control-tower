@@ -47,7 +47,7 @@ Next step: {next_step}
 Past conversations about it (read them with session_search session_id=… if you need details):
 {sessions}
 
-(To file this topic in a folder: PATCH http://127.0.0.1:4747/api/topics/{topic_id} with {{"folder_id": "<id>"}} or {{"folder": "<name>"}} (created if missing); GET /api/folders lists them.)
+(To file this topic in a folder, send header Content-Type: application/json: PATCH http://127.0.0.1:4747/api/topics/{topic_id} with {{"folder_id": "<id>"}} or {{"folder": "<name>"}} (created if missing); GET /api/folders lists them.)
 
 Message from {user}:
 {message}"""
