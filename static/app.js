@@ -13,22 +13,21 @@ const LOCALE = "en-GB";
 const OWNER = { user: "Your move", hermes: "Hermes' move", waiting: "Waiting", none: "Nothing to do" };
 const STATUS = { open: "Open", snoozed: "Snoozed", done: "Done", dropped: "Dropped" };
 const isRoutine = (t) => !!t.cron_job_id;
-const FILTERS = [
-  { id: "user", label: "Your move", icon: "🫵", test: (t) => !isRoutine(t) && t.status === "open" && t.owner === "user" },
-  { id: "hermes", label: "Hermes' move", icon: "🤖", test: (t) => !isRoutine(t) && t.status === "open" && t.owner === "hermes" },
-  { id: "waiting", label: "Waiting", icon: "⏳", test: (t) => !isRoutine(t) && t.status === "open" && (t.owner === "waiting" || t.owner === "none") },
-  { id: "open", label: "All open", icon: "📂", test: (t) => !isRoutine(t) && t.status === "open" },
-  { sep: true },
-  { id: "routines", label: "Routines", icon: "🔁", test: (t) => isRoutine(t), badge: (ts) => ts.filter((t) => isRoutine(t) && t.cron && t.cron.last_status && t.cron.last_status !== "ok").length },
-  { sep: true },
-  { id: "snoozed", label: "Snoozed", icon: "⏸️", test: (t) => !isRoutine(t) && t.status === "snoozed" },
-  { id: "done", label: "Done", icon: "✅", test: (t) => !isRoutine(t) && t.status === "done" },
-  { id: "dropped", label: "Dropped", icon: "🗑️", test: (t) => !isRoutine(t) && t.status === "dropped" },
+// status chips (top of the list); scope = all | routines | folder:<id> (sidebar)
+const STATUS_CHIPS = [
+  { id: "open", label: "Open", test: (t) => t.status === "open" },
+  { id: "user", label: "🫵 Your move", test: (t) => t.status === "open" && t.owner === "user" },
+  { id: "hermes", label: "🤖 Hermes", test: (t) => t.status === "open" && t.owner === "hermes" },
+  { id: "waiting", label: "⏳ Waiting", test: (t) => t.status === "open" && (t.owner === "waiting" || t.owner === "none") },
+  { id: "snoozed", label: "⏸️ Snoozed", test: (t) => t.status === "snoozed" },
+  { id: "done", label: "✅ Done", test: (t) => t.status === "done" },
+  { id: "dropped", label: "🗑️ Dropped", test: (t) => t.status === "dropped" },
 ];
-
-const state = { folders: [], topics: [], filter: localStorage.getItem("filter") || "open", sel: localStorage.getItem("sel"), q: "", detail: null, es: null, live: null };
-const isFolderFilter = (id) => id.startsWith("folder:");
-if (!FILTERS.some((f) => f.id === state.filter) && !isFolderFilter(state.filter)) state.filter = "open";
+const isFolderScope = (id) => id.startsWith("folder:");
+const state = { folders: [], topics: [], scope: localStorage.getItem("scope") || "all", status: localStorage.getItem("status") || "open", sel: localStorage.getItem("sel"), q: "", detail: null, es: null, live: null };
+if (!STATUS_CHIPS.some((c) => c.id === state.status)) state.status = "open";
+const setScope = (s) => { state.scope = s; localStorage.setItem("scope", s); };
+const inScope = (t) => state.scope === "routines" ? isRoutine(t) : !isRoutine(t) && (state.scope === "all" || "folder:" + t.folder_id === state.scope);
 
 function rel(ts) {
   if (!ts) return "";
@@ -61,7 +60,7 @@ async function loadTopics() {
   const data = await api("/api/topics");
   state.topics = data.topics;
   state.folders = data.folders || [];
-  if (isFolderFilter(state.filter) && !state.folders.some((f) => "folder:" + f.id === state.filter)) state.filter = "open";
+  if (isFolderScope(state.scope) && !state.folders.some((f) => "folder:" + f.id === state.scope)) setScope("all");
   renderFilters();
   renderList();
   renderRefresh(data.refresh, data.last_refresh);
@@ -88,26 +87,33 @@ function pollRefresh() {
 
 // ------------------------------------------------------------------ sidebar & list
 function renderFilters() {
-  const folderBtns = `<div class="sep"></div><div class="nav-title">Folders<button class="mini" id="addFolder" title="New folder">＋</button></div>` +
-    state.folders.map((f) => {
-      const n = state.topics.filter((t) => t.folder_id === f.id && !isRoutine(t) && ["open", "snoozed"].includes(t.status)).length;
-      return `<button data-f="folder:${f.id}" class="${state.filter === "folder:" + f.id ? "active" : ""}"><span>${esc(f.emoji)}</span>${esc(f.name)}<span class="count">${n || ""}</span></button>`;
-    }).join("");
-  $("#filters").innerHTML = FILTERS.map((f) => {
-    if (f.sep) return '<div class="sep"></div>';
-    const n = state.topics.filter(f.test).length;
-    const bad = f.badge ? f.badge(state.topics) : 0;
-    return `<button data-f="${f.id}" class="${state.filter === f.id ? "active" : ""}"><span>${f.icon}</span>${f.label}${bad ? `<span class="alert-dot" title="${bad} failing">!</span>` : ""}<span class="count">${n || ""}</span></button>`;
-  }).join("") + folderBtns;
+  const openN = (test) => state.topics.filter((t) => !isRoutine(t) && t.status === "open" && test(t)).length;
+  const btn = (id, icon, label, n, extra = "") => `<button data-s="${id}" class="${state.scope === id ? "active" : ""}"><span>${icon}</span><span class="lbl">${label}</span>${extra}<span class="count">${n || ""}</span></button>`;
+  const failing = state.topics.filter((t) => isRoutine(t) && t.cron && t.cron.last_status && t.cron.last_status !== "ok").length;
+  $("#filters").innerHTML =
+    btn("all", "📂", "All topics", openN(() => true)) +
+    btn("routines", "🔁", "Routines", state.topics.filter(isRoutine).length, failing ? `<span class="alert-dot" title="${failing} failing">!</span>` : "") +
+    `<div class="sep"></div><div class="nav-title">Folders<button class="mini" id="addFolder" title="New folder">＋</button></div>` +
+    state.folders.map((f) => btn("folder:" + f.id, esc(f.emoji), esc(f.name), openN((t) => t.folder_id === f.id))).join("");
   $("#addFolder").onclick = () => folderModal();
-  document.querySelectorAll("#filters button[data-f]").forEach((b) => (b.onclick = () => { state.filter = b.dataset.f; localStorage.setItem("filter", state.filter); renderFilters(); renderList(); }));
+  document.querySelectorAll("#filters button[data-s]").forEach((b) => (b.onclick = () => { setScope(b.dataset.s); renderFilters(); renderList(); }));
+}
+
+function renderChips() {
+  const el = $("#chips");
+  if (state.scope === "routines" || state.q) { el.innerHTML = ""; return; }
+  const scoped = state.topics.filter(inScope);
+  el.innerHTML = STATUS_CHIPS.map((c) => { const n = scoped.filter(c.test).length; return `<button data-c="${c.id}" class="chip ${state.status === c.id ? "active" : ""} ${n ? "" : "zero"}">${c.label}${n ? ` <span>${n}</span>` : ""}</button>`; }).join("");
+  el.querySelectorAll("button").forEach((b) => (b.onclick = () => { state.status = b.dataset.c; localStorage.setItem("status", state.status); renderList(); }));
 }
 
 function renderList() {
-  const folder = isFolderFilter(state.filter) ? state.folders.find((x) => "folder:" + x.id === state.filter) : null;
-  const f = folder ? { test: (t) => t.folder_id === folder.id && !isRoutine(t) } : FILTERS.find((x) => x.id === state.filter) || FILTERS[3];
+  renderChips();
+  const folder = isFolderScope(state.scope) ? state.folders.find((x) => "folder:" + x.id === state.scope) : null;
+  const chip = STATUS_CHIPS.find((c) => c.id === state.status);
   const q = state.q.toLowerCase();
-  const items = q ? state.topics.filter((t) => (t.title + " " + t.summary + " " + t.next_step).toLowerCase().includes(q)) : state.topics.filter(f.test);
+  const items = q ? state.topics.filter((t) => (t.title + " " + t.summary + " " + t.next_step).toLowerCase().includes(q))
+    : state.topics.filter((t) => inScope(t) && (state.scope === "routines" || chip.test(t)));
   const card = (t) => {
     const r = isRoutine(t);
     const sub = r ? (t.cron ? `${esc(t.cron.schedule)} · next ${esc(fmtWhen(t.cron.next_run_at))}` : "") : esc(t.next_step);
@@ -127,26 +133,19 @@ function renderList() {
   };
   let html = "";
   if (!items.length) html = `<div class="muted" style="padding:30px 10px;text-align:center">${q ? "No results" : "Nothing here 🎉"}</div>`;
-  else if (folder && !q) {
-    const rank = { open: 0, snoozed: 1, done: 2, dropped: 3 };
-    const sorted = [...items].sort((a, b) => rank[a.status] - rank[b.status]);
-    for (const st of ["open", "snoozed", "done", "dropped"]) {
-      const g = sorted.filter((t) => t.status === st);
-      if (g.length) html += `<div class="group-title">${STATUS[st]} · ${g.length}</div>` + g.map(card).join("");
-    }
-    html = `<div class="folder-head"><span>${esc(folder.emoji)} <b>${esc(folder.name)}</b></span><span><button class="mini" id="editFolder">Rename</button><button class="mini" id="delFolder">Delete</button></span></div>` + html;
-  } else if (state.filter === "open" && !q) {
+  else if (state.status === "open" && state.scope !== "routines" && !q) {
     for (const o of ["user", "hermes", "waiting", "none"]) {
       const g = items.filter((t) => t.owner === o);
       if (g.length) html += `<div class="group-title">${OWNER[o]} · ${g.length}</div>` + g.map(card).join("");
     }
   } else html = items.map(card).join("");
+  if (folder && !q) html = `<div class="folder-head"><span>${esc(folder.emoji)} <b>${esc(folder.name)}</b></span><span><button class="mini" id="editFolder">Rename</button><button class="mini" id="delFolder">Delete</button></span></div>` + html;
   $("#list").innerHTML = html;
   document.querySelectorAll(".card").forEach((c) => (c.onclick = () => openTopic(c.dataset.id)));
   if (folder && $("#editFolder")) {
     $("#editFolder").onclick = () => folderModal(folder);
     $("#delFolder").onclick = () => modal(`<header>🗑️ Delete the folder “${esc(folder.name)}”?</header><div class="content"><p>Topics inside are kept, they just become unfiled.</p></div><footer><button class="act" data-m="cancel">Cancel</button><button class="act primary" data-m="ok">Delete folder</button></footer>`,
-      async (c) => { if (c === "ok") { await api("/api/folders/" + folder.id, { method: "DELETE" }); state.filter = "open"; await loadTopics(); if (state.sel) openTopic(state.sel, true); } });
+      async (c) => { if (c === "ok") { await api("/api/folders/" + folder.id, { method: "DELETE" }); setScope("all"); await loadTopics(); if (state.sel) openTopic(state.sel, true); } });
   }
 }
 
@@ -390,7 +389,7 @@ $("#newTopic").onclick = () => {
       const title = $("#newTitle").value.trim();
       if (!title) return;
       const t = await api("/api/topics", { method: "POST", body: { title } });
-      state.filter = "open"; await loadTopics(); openTopic(t.id);
+      setScope("all"); state.status = "open"; await loadTopics(); openTopic(t.id);
       setTimeout(() => $("#input")?.focus(), 200);
     }, false, () => $("#newTitle").value);
   setTimeout(() => { const i = $("#newTitle"); i.focus(); i.onkeydown = (e) => e.key === "Enter" && $('[data-m="ok"]').click(); }, 30);

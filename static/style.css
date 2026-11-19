@@ -187,3 +187,12 @@ nav .nav-title .mini { font-size: 15px; }
 .folder-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 6px 0; }
 .row2 { display: flex; gap: 8px; }
 #folderSel { max-width: 180px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 14px 8px; }
+.chip { border: 1px solid var(--border); background: var(--panel); border-radius: 99px; padding: 3px 9px; font-size: 12px; cursor: pointer; color: inherit; }
+.chip span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip:hover { background: var(--gray-soft); }
+.chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip.active span { color: rgba(255,255,255,.8); }
+.chip.zero:not(.active) { opacity: .5; }
+nav button .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
