@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -39,11 +40,14 @@ RUNS: dict[str, ChatRun] = {}
 
 PREAMBLE = """[Sent from Hermes Control Tower — this conversation is about one specific topic. Reply in the language {user} writes in.]
 Topic: {emoji} {title}{routine}
+Folder: {folder}
 Status: {status} · Whose move: {owner}
 Where we are: {summary}
 Next step: {next_step}
 Past conversations about it (read them with session_search session_id=… if you need details):
 {sessions}
+
+(To file this topic in a folder: PATCH http://127.0.0.1:4747/api/topics/{topic_id} with {{"folder_id": "<id>"}} or {{"folder": "<name>"}} (created if missing); GET /api/folders lists them.)
 
 Message from {user}:
 {message}"""
@@ -69,7 +73,8 @@ def _build_query(conn, topic, message):
         if job:
             routine = (f"\nThis is an automated ROUTINE: your cron job \"{job.get('name')}\" (id {job['id']}, "
                        f"{store.schedule_text(job)}). To change it, use the cronjob tool on that id.")
-    return PREAMBLE.format(user=store.USER_NAME, routine=routine, emoji=topic["emoji"], title=topic["title"], status=STATUS_TXT.get(topic["status"], topic["status"]),
+    frow = conn.execute("SELECT name, emoji FROM folders WHERE id=?", (topic["folder_id"],)).fetchone() if topic["folder_id"] else None
+    return PREAMBLE.format(folder=f"{frow['emoji']} {frow['name']}" if frow else "(none)", topic_id=topic["id"], user=store.USER_NAME, routine=routine, emoji=topic["emoji"], title=topic["title"], status=STATUS_TXT.get(topic["status"], topic["status"]),
                            owner=OWNER_TXT.get(topic["owner"], topic["owner"]), summary=topic["summary"] or "—",
                            next_step=topic["next_step"] or "—", sessions="\n".join(lines) or "(none)", message=message)
 
@@ -198,7 +203,8 @@ async def list_topics(request):
         for t in topics:
             t["running"] = t["id"] in RUNS and not RUNS[t["id"]].done
             t["cron"] = store.cron_info(jobs[t["cron_job_id"]]) if t.get("cron_job_id") in jobs else None
-        return j({"topics": topics, "last_refresh": store.get_meta(conn, "last_refresh"), "refresh": REFRESH})
+        folders = [dict(r) for r in conn.execute("SELECT * FROM folders ORDER BY position, created_at")]
+        return j({"folders": folders, "topics": topics, "last_refresh": store.get_meta(conn, "last_refresh"), "refresh": REFRESH})
     finally:
         conn.close()
 
@@ -263,6 +269,14 @@ async def patch_topic(request):
         if "title" in body and body["title"].strip():
             sets += ["title=?", "manual=1"]
             vals.append(body["title"].strip()[:80])
+        if "folder" in body and body["folder"] and str(body["folder"]).strip():
+            body["folder_id"] = _folder_by_name(conn, str(body["folder"]).strip())
+        if "folder_id" in body:
+            fid = body["folder_id"] or None
+            if fid and not conn.execute("SELECT 1 FROM folders WHERE id=?", (fid,)).fetchone():
+                return j({"error": "unknown folder"}, 400)
+            sets.append("folder_id=?")
+            vals.append(fid)
         for k in ("owner", "emoji", "next_step", "summary"):
             if k in body:
                 sets.append(f"{k}=?")
@@ -273,6 +287,70 @@ async def patch_topic(request):
         conn.execute(f"UPDATE topics SET {', '.join(sets)} WHERE id=?", vals + [tid])
         conn.commit()
         return j(store.topic_dict(conn, conn.execute("SELECT * FROM topics WHERE id=?", (tid,)).fetchone()))
+    finally:
+        conn.close()
+
+
+def _folder_by_name(conn, name, emoji=None):
+    row = conn.execute("SELECT id FROM folders WHERE lower(name)=lower(?)", (name,)).fetchone()
+    if row:
+        return row["id"]
+    fid = "f_" + uuid.uuid4().hex[:8]
+    pos = conn.execute("SELECT coalesce(max(position),0)+1 FROM folders").fetchone()[0]
+    conn.execute("INSERT INTO folders(id,name,emoji,position,created_at) VALUES(?,?,?,?,?)",
+                 (fid, name[:60], emoji or "📁", pos, time.time()))
+    return fid
+
+
+async def list_folders(request):
+    conn = store.connect()
+    try:
+        rows = conn.execute("SELECT f.*, (SELECT count(*) FROM topics t WHERE t.folder_id=f.id) AS topic_count "
+                            "FROM folders f ORDER BY position, created_at").fetchall()
+        return j({"folders": [dict(r) for r in rows]})
+    finally:
+        conn.close()
+
+
+async def create_folder(request):
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        return j({"error": "name required"}, 400)
+    conn = store.connect()
+    try:
+        fid = _folder_by_name(conn, name, body.get("emoji"))
+        conn.commit()
+        return j(dict(conn.execute("SELECT * FROM folders WHERE id=?", (fid,)).fetchone()))
+    finally:
+        conn.close()
+
+
+async def patch_folder(request):
+    fid = request.match_info["id"]
+    body = await request.json()
+    conn = store.connect()
+    try:
+        if not conn.execute("SELECT 1 FROM folders WHERE id=?", (fid,)).fetchone():
+            return j({"error": "not found"}, 404)
+        for k in ("name", "emoji"):
+            if (body.get(k) or "").strip():
+                conn.execute(f"UPDATE folders SET {k}=? WHERE id=?", (body[k].strip()[:60], fid))
+        conn.commit()
+        return j(dict(conn.execute("SELECT * FROM folders WHERE id=?", (fid,)).fetchone()))
+    finally:
+        conn.close()
+
+
+async def delete_folder(request):
+    """Deleting a folder never deletes topics: they just become unfiled."""
+    fid = request.match_info["id"]
+    conn = store.connect()
+    try:
+        conn.execute("UPDATE topics SET folder_id=NULL WHERE folder_id=?", (fid,))
+        conn.execute("DELETE FROM folders WHERE id=?", (fid,))
+        conn.commit()
+        return j({"ok": True})
     finally:
         conn.close()
 
@@ -427,6 +505,10 @@ def make_app():
     app.router.add_get("/api/topics/{id}/stream", stream)
     app.router.add_post("/api/topics/{id}/stop", stop_chat)
     app.router.add_post("/api/topics/{id}/cron", cron_action)
+    app.router.add_get("/api/folders", list_folders)
+    app.router.add_post("/api/folders", create_folder)
+    app.router.add_patch("/api/folders/{id}", patch_folder)
+    app.router.add_delete("/api/folders/{id}", delete_folder)
     app.router.add_get("/api/sessions/{sid}", session_view)
     app.router.add_post("/api/refresh", refresh_post)
     app.router.add_get("/api/refresh", refresh_get)

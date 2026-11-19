@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_topic ON chat_messages(topic_id, id);
+CREATE TABLE IF NOT EXISTS folders (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  emoji TEXT DEFAULT '📁',
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -65,6 +72,9 @@ def connect() -> sqlite3.Connection:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(topics)")}
     if "cron_job_id" not in cols:
         conn.execute("ALTER TABLE topics ADD COLUMN cron_job_id TEXT")
+        conn.commit()
+    if "folder_id" not in cols:
+        conn.execute("ALTER TABLE topics ADD COLUMN folder_id TEXT")
         conn.commit()
     return conn
 

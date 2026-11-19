@@ -26,8 +26,9 @@ const FILTERS = [
   { id: "dropped", label: "Dropped", icon: "🗑️", test: (t) => !isRoutine(t) && t.status === "dropped" },
 ];
 
-const state = { topics: [], filter: localStorage.getItem("filter") || "open", sel: localStorage.getItem("sel"), q: "", detail: null, es: null, live: null };
-if (!FILTERS.some((f) => f.id === state.filter)) state.filter = "open";
+const state = { folders: [], topics: [], filter: localStorage.getItem("filter") || "open", sel: localStorage.getItem("sel"), q: "", detail: null, es: null, live: null };
+const isFolderFilter = (id) => id.startsWith("folder:");
+if (!FILTERS.some((f) => f.id === state.filter) && !isFolderFilter(state.filter)) state.filter = "open";
 
 function rel(ts) {
   if (!ts) return "";
@@ -59,6 +60,8 @@ function cronPill(c) {
 async function loadTopics() {
   const data = await api("/api/topics");
   state.topics = data.topics;
+  state.folders = data.folders || [];
+  if (isFolderFilter(state.filter) && !state.folders.some((f) => "folder:" + f.id === state.filter)) state.filter = "open";
   renderFilters();
   renderList();
   renderRefresh(data.refresh, data.last_refresh);
@@ -85,17 +88,24 @@ function pollRefresh() {
 
 // ------------------------------------------------------------------ sidebar & list
 function renderFilters() {
+  const folderBtns = `<div class="sep"></div><div class="nav-title">Folders<button class="mini" id="addFolder" title="New folder">＋</button></div>` +
+    state.folders.map((f) => {
+      const n = state.topics.filter((t) => t.folder_id === f.id && !isRoutine(t) && ["open", "snoozed"].includes(t.status)).length;
+      return `<button data-f="folder:${f.id}" class="${state.filter === "folder:" + f.id ? "active" : ""}"><span>${esc(f.emoji)}</span>${esc(f.name)}<span class="count">${n || ""}</span></button>`;
+    }).join("");
   $("#filters").innerHTML = FILTERS.map((f) => {
     if (f.sep) return '<div class="sep"></div>';
     const n = state.topics.filter(f.test).length;
     const bad = f.badge ? f.badge(state.topics) : 0;
     return `<button data-f="${f.id}" class="${state.filter === f.id ? "active" : ""}"><span>${f.icon}</span>${f.label}${bad ? `<span class="alert-dot" title="${bad} failing">!</span>` : ""}<span class="count">${n || ""}</span></button>`;
-  }).join("");
-  document.querySelectorAll("#filters button").forEach((b) => (b.onclick = () => { state.filter = b.dataset.f; localStorage.setItem("filter", state.filter); renderFilters(); renderList(); }));
+  }).join("") + folderBtns;
+  $("#addFolder").onclick = () => folderModal();
+  document.querySelectorAll("#filters button[data-f]").forEach((b) => (b.onclick = () => { state.filter = b.dataset.f; localStorage.setItem("filter", state.filter); renderFilters(); renderList(); }));
 }
 
 function renderList() {
-  const f = FILTERS.find((x) => x.id === state.filter) || FILTERS[3];
+  const folder = isFolderFilter(state.filter) ? state.folders.find((x) => "folder:" + x.id === state.filter) : null;
+  const f = folder ? { test: (t) => t.folder_id === folder.id && !isRoutine(t) } : FILTERS.find((x) => x.id === state.filter) || FILTERS[3];
   const q = state.q.toLowerCase();
   const items = q ? state.topics.filter((t) => (t.title + " " + t.summary + " " + t.next_step).toLowerCase().includes(q)) : state.topics.filter(f.test);
   const card = (t) => {
@@ -117,7 +127,15 @@ function renderList() {
   };
   let html = "";
   if (!items.length) html = `<div class="muted" style="padding:30px 10px;text-align:center">${q ? "No results" : "Nothing here 🎉"}</div>`;
-  else if (state.filter === "open" && !q) {
+  else if (folder && !q) {
+    const rank = { open: 0, snoozed: 1, done: 2, dropped: 3 };
+    const sorted = [...items].sort((a, b) => rank[a.status] - rank[b.status]);
+    for (const st of ["open", "snoozed", "done", "dropped"]) {
+      const g = sorted.filter((t) => t.status === st);
+      if (g.length) html += `<div class="group-title">${STATUS[st]} · ${g.length}</div>` + g.map(card).join("");
+    }
+    html = `<div class="folder-head"><span>${esc(folder.emoji)} <b>${esc(folder.name)}</b></span><span><button class="mini" id="editFolder">Rename</button><button class="mini" id="delFolder">Delete</button></span></div>` + html;
+  } else if (state.filter === "open" && !q) {
     for (const o of ["user", "hermes", "waiting", "none"]) {
       const g = items.filter((t) => t.owner === o);
       if (g.length) html += `<div class="group-title">${OWNER[o]} · ${g.length}</div>` + g.map(card).join("");
@@ -125,6 +143,11 @@ function renderList() {
   } else html = items.map(card).join("");
   $("#list").innerHTML = html;
   document.querySelectorAll(".card").forEach((c) => (c.onclick = () => openTopic(c.dataset.id)));
+  if (folder && $("#editFolder")) {
+    $("#editFolder").onclick = () => folderModal(folder);
+    $("#delFolder").onclick = () => modal(`<header>🗑️ Delete the folder “${esc(folder.name)}”?</header><div class="content"><p>Topics inside are kept, they just become unfiled.</p></div><footer><button class="act" data-m="cancel">Cancel</button><button class="act primary" data-m="ok">Delete folder</button></footer>`,
+      async (c) => { if (c === "ok") { await api("/api/folders/" + folder.id, { method: "DELETE" }); state.filter = "open"; await loadTopics(); if (state.sel) openTopic(state.sel, true); } });
+  }
 }
 
 $("#search").oninput = (e) => { state.q = e.target.value; renderList(); };
@@ -183,6 +206,7 @@ function renderDetail(keepScroll) {
       <div class="d-pills">
         ${r ? `<span class="pill waiting">🔁 Routine</span>${cronPill(t.cron)}` : `<span class="pill ${t.status === "open" ? "none" : t.status}">${STATUS[t.status]}</span>
         <select id="ownerSel" title="Whose move">${Object.entries(OWNER).map(([k, v]) => `<option value="${k}" ${k === t.owner ? "selected" : ""}>${v}</option>`).join("")}</select>`}
+        ${r ? "" : `<select id="folderSel" title="Folder"><option value="">📁 No folder</option>${state.folders.map((f) => `<option value="${f.id}" ${f.id === t.folder_id ? "selected" : ""}>${esc(f.emoji)} ${esc(f.name)}</option>`).join("")}<option value="__new">＋ New folder…</option></select>`}
         <span class="muted small">· last activity ${rel(t.last_activity)}</span>
       </div>
       <div class="actions">${actions}</div>
@@ -212,6 +236,12 @@ function renderDetail(keepScroll) {
   title.onblur = async () => { const v = title.textContent.trim(); if (v && v !== t.title) { await api("/api/topics/" + t.id, { method: "PATCH", body: { title: v } }); t.title = v; loadTopics(); } };
   const os = $("#ownerSel");
   if (os) os.onchange = async (e) => { await api("/api/topics/" + t.id, { method: "PATCH", body: { owner: e.target.value } }); t.owner = e.target.value; loadTopics(); };
+  const fs = $("#folderSel");
+  if (fs) fs.onchange = async (e) => {
+    if (e.target.value === "__new") { e.target.value = t.folder_id || ""; folderModal(null, t); return; }
+    await api("/api/topics/" + t.id, { method: "PATCH", body: { folder_id: e.target.value || null } });
+    t.folder_id = e.target.value || null; loadTopics();
+  };
   document.querySelectorAll(".actions .act").forEach((b) => (b.onclick = () => action(b.dataset.a, b)));
   document.querySelectorAll(".sess").forEach((s) => (s.onclick = () => showSession(s.dataset.sid)));
   document.querySelectorAll(".quick button").forEach((b) => (b.onclick = () => send(b.dataset.q)));
@@ -365,6 +395,25 @@ $("#newTopic").onclick = () => {
     }, false, () => $("#newTitle").value);
   setTimeout(() => { const i = $("#newTitle"); i.focus(); i.onkeydown = (e) => e.key === "Enter" && $('[data-m="ok"]').click(); }, 30);
 };
+
+function folderModal(folder, assignTopic) {
+  modal(`<header>${folder ? "✏️ Rename folder" : "📁 New folder"}</header>
+    <div class="content"><div class="row2"><input type="text" id="fEmoji" value="${esc(folder?.emoji || "📁")}" maxlength="4" style="width:60px;text-align:center"><input type="text" id="fName" placeholder="e.g. Bali" value="${esc(folder?.name || "")}"></div></div>
+    <footer><button class="act" data-m="cancel">Cancel</button><button class="act primary" data-m="ok">Save</button></footer>`,
+    async (c) => {
+      if (c !== "ok") return;
+      const name = $("#fName").value.trim(), emoji = $("#fEmoji").value.trim() || "📁";
+      if (!name) return;
+      if (folder) await api("/api/folders/" + folder.id, { method: "PATCH", body: { name, emoji } });
+      else {
+        const f = await api("/api/folders", { method: "POST", body: { name, emoji } });
+        if (assignTopic) await api("/api/topics/" + assignTopic.id, { method: "PATCH", body: { folder_id: f.id } });
+      }
+      await loadTopics();
+      if (state.sel) openTopic(state.sel, true);
+    });
+  setTimeout(() => { const i = $("#fName"); i.focus(); i.onkeydown = (e) => e.key === "Enter" && $('[data-m="ok"]').click(); }, 30);
+}
 
 $("#refreshBtn").onclick = async () => { const r = await api("/api/refresh", { method: "POST" }); renderRefresh(r.refresh); pollRefresh(); };
 
