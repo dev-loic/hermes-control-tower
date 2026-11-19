@@ -490,7 +490,10 @@ async def local_only(request, handler):
             return web.Response(status=403, text="forbidden origin")
         if request.content_type != "application/json":
             return web.Response(status=415, text="application/json required")
-    return await handler(request)
+    resp = await handler(request)
+    if request.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 def make_app():
